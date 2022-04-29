@@ -1,0 +1,195 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Infrastructure Script - deploys vpc for project 2
+
+Parameters:
+  Env:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+  AmiToUse:
+    Description: Image to User
+    Type: AWS::EC2::Image::Id
+  AccountId:
+    Description: AccountName
+    Type: String
+  BucketName:
+    Description: BucketName
+    Type: String
+
+Resources:
+
+  CodeBucket:
+   Type: AWS::S3::Bucket
+   Properties:
+    BucketName: !Sub "${AccountId}-${BucketName}"
+    PublicAccessBlockConfiguration:
+      BlockPublicAcls: true
+      BlockPublicPolicy: true
+      IgnorePublicAcls: true
+      RestrictPublicBuckets: true
+
+  CodeBucketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+      Policies:
+        - PolicyName: ReadBucketPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - "s3:GetObject*"
+                  - "s3:ListBucket"
+                Resource: '*'
+      RoleName: CodeBucketRole
+      # ManagedPolicyArns:
+      #   - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  ServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: 
+        - !Ref CodeBucketRole
+  WebServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Webservers
+      VpcId: 
+        Fn::ImportValue: !Sub "${Env}-VPC"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for LBs
+      VpcId:  
+        Fn::ImportValue:
+          !Sub "${Env}-VPC"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+            apt-get update -y
+            apt-get install apache2 -y
+            systemctl start apache2.service
+            apt-get install -y python3-pip
+            pip install awscli
+
+            cd /var/www/html
+            # echo "Udacity Demo Web Server Up and Running!?!" > index.html
+            aws s3 cp s3://${AccountId}-${BucketName}/index.html index.html
+            echo "----"  >> index.html
+      ImageId: !Ref AmiToUse
+      SecurityGroups:
+        - !Ref WebServerSecGroup
+      InstanceType: t3.small
+      IamInstanceProfile: !Ref ServerInstanceProfile 
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: "10"
+
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${Env}-Priv-SN-1"
+        - Fn::ImportValue: !Sub "${Env}-Priv-SN-2"
+      AvailabilityZones:
+        - Fn::Select:
+          - 0
+          - Fn::GetAZs: ''
+        - Fn::Select:
+          - 1
+          - Fn::GetAZs: ''
+      LaunchConfigurationName: !Ref WebAppLaunchConfig
+      MinSize: '4'
+      MaxSize: '4'
+      TargetGroupARNs: 
+        - !Ref WebAppTargetGroup
+      HealthCheckGracePeriod: 60
+      HealthCheckType: ELB
+
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue: !Sub "${Env}-VPC"
+
+  WebAppLB:
+   Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+   Properties:
+    Subnets:
+      - Fn::ImportValue: !Sub "${Env}-Pub-SN-1"
+      - Fn::ImportValue: !Sub "${Env}-Pub-SN-2"
+    SecurityGroups:
+      - !Ref LBSecGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebAppTargetGroup
+      LoadBalancerArn: !Ref WebAppLB
+      Port: '80'
+      Protocol: HTTP
+  
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref WebAppTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref Listener
+      Priority: 1
+Outputs:
+  AppDnsName:
+    Description: the public dns of the alb / application
+    Value: !Sub "http://${WebAppLB.DNSName}"

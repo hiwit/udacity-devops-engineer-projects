@@ -1,0 +1,18 @@
+[
+    {
+        "ParameterKey":"Env",
+        "ParameterValue":"P2"
+    },
+    {
+        "ParameterKey":"AmiToUse",
+        "ParameterValue":"ami-000722651477bd39b"
+    },
+    {
+        "ParameterKey":"BucketName",
+        "ParameterValue":"p2-codebucket"
+    },
+    {
+        "ParameterKey":"AccountId",
+        "ParameterValue":"277125246220"
+    }
+]
